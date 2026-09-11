@@ -1,0 +1,19 @@
+project:
+  type: website
+  output-dir: _site
+
+website:
+  title: "FReedOM simulation study"
+  page-footer:
+    left: "Supporting simulation study for the FReedOM trial"
+
+format:
+  html:
+    toc: true
+    toc-depth: 3
+    code-fold: true
+    code-tools: true
+    self-contained: false
+
+execute:
+  warning: false
