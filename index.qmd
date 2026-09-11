@@ -1,12 +1,6 @@
 ---
 title: "FReedOM simulation study"
-format:
-  html:
-    toc: true
-  pdf:
-    toc: true
 editor: visual
-bibliography: FReedOM_refs.bib
 ---
 
 ## Introduction
