@@ -1,6 +1,6 @@
 # FReedOM simulation study
 
-This repo contains all code and simulation results supporting the sample size calculations for the FReedOM trial. The rendered simulation study is available at [FReedOM simulation study](https://YOUR-USERNAME.github.io/freedom-simulations/). The computationally intensive simulations are not rerun when the site is rendered. The code used to generate them is included in index.qmd, with the saved .rds files used to reproduce the reported results and figures.
+This repo contains all code and simulation results supporting the sample size calculations for the FReedOM trial. The rendered simulation study is available at [FReedOM simulation study](https://lictr.github.io/FReedOM/). The computationally intensive simulations are not rerun when the site is rendered. The code used to generate them is included in index.qmd, with the saved .rds files used to reproduce the reported results and figures.
 
 Files
 index.qmd — Quarto document containing the simulation methods, R code, analysis and results.
