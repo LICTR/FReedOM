@@ -301,7 +301,7 @@ sim_trial <- function(ctr_qmat,  exp_qmat, n){
 
 ## WR non-inferiority margin
 
-We start by mapping our non-inferiority hypotheses to the win ratio scale. The WR is a consistent estimator, but biased in small samples. We therefore simulate a large ($N = 10\^4$) number of trials, each with a large per-arm sample size ($n = 10\^3$). The mean of the estimated win ratios then provides an accurate estimate of the true win ratio under our non-inferiority hypotheses. Note that this code is not run when rendering the document.
+We start by mapping our non-inferiority hypotheses to the win ratio scale. The WR is a consistent estimator, but biased in small samples. We therefore simulate a large ($N = 10^4$) number of trials, each with a large per-arm sample size ($n = 10^3$). The mean of the estimated win ratios then provides an accurate estimate of the true win ratio under our non-inferiority hypotheses. Note that this code is not run when rendering the document.
 
 ```{r, eval = FALSE}
 set.seed(872356)
