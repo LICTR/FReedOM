@@ -60,7 +60,7 @@ This MSM has 10 transition rates to be specified, which we simplify by assuming:
 -   the progression rate is consistent across the H and I states;
 -   the recovery from infection rate is consistent across the I and B states.
 
-Given these assumptions, we can use the estimated hazard rates described in Section 1.2.9 of the application for transition rates in the control arm. Specifically, we take the combined hazard of progression and death to be $-\ln(0.807)/2 = $`{r} round( -log(0.807)/2, 3)`, and divide this such that 80% of the hazard relates to progression and the remaining 20% to death. For infections, we use the estimated infection incidence rate of 0.199 infections per patient per year. To model transitions out of an infected state, we use an assumed expected infection duration of 2 weeks. This gives us the following matrix of transition rates:
+Given these assumptions, we can use the estimated hazard rates described in Section 1.2.9 of the application for transition rates in the control arm. Specifically, we take the combined hazard of progression and death to be $-\ln(0.807)/2 = $ `{r} round( -log(0.807)/2, 3)`, and divide this such that 80% of the hazard relates to progression and the remaining 20% to death. For infections, we use the estimated infection incidence rate of 0.199 infections per patient per year. To model transitions out of an infected state, we use an assumed expected infection duration of 2 weeks. This gives us the following matrix of transition rates:
 
 ```{r}
 # Overall rate for PFS
