@@ -410,11 +410,6 @@ effects <- expand.grid(I_effs = seq(0.5, 1, length.out=20),
 
 # Note, 20 x 20 points with N = 10^3 at each takes ~ 8 hours
 
-#set.seed(8763285)
-#df <- cbind(effects, t(apply(effects, 1, wr_power,
-#                             n = 225, qmat=qmat, N = 10^1)))
-#saveRDS(df, "raw_sims_225.rds")
-
 set.seed(3240387)
 df <- cbind(effects, t(apply(effects, 1, wr_power,
                              n = 214, qmat=qmat, N = 10^3)))
