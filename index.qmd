@@ -8,7 +8,7 @@ bibliography: FReedOM_refs.bib
 
 This document contains reproducible code supporting the simulation-based sample size calculations for FReedOM, following methodological guidance for trials with a win ratio as the primary outcome [@Gregson2026]. Here, we will first describe the assumed underlying data generating process, illustrate the power of the trial at a range of effect sizes for the proposed sample size, and report the results of a sensitivity analysis.
 
-The underlying simulations are computationally intensive and are therefore not rerun when this document is rendered. Pre-generated simulation results are supplied alongside this document, allowing all reported analyses and figures to be reproduced directly. Code for regenerating the simulation results from first principles is included in unevaluated code blocks. Session information is included at the end of this document for full reproducibility.
+The underlying simulations are computationally intensive and are therefore not rerun when this document is rendered. Pre-generated simulation results are supplied alongside this document at [github.com/LICTR/FReedOM](https://github.com/LICTR/FReedOM), allowing all reported analyses and figures to be reproduced directly. Code for regenerating the simulation results from first principles is included in unevaluated code blocks. Session information is included at the end of this document for full reproducibility.
 
 ## The win ratio in FReedOM
 
