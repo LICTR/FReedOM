@@ -1,6 +1,7 @@
 ---
 title: "FReedOM simulation study"
 editor: visual
+bibliography: FReedOM_refs.bib
 ---
 
 ## Introduction
