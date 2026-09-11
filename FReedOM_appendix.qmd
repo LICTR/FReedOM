@@ -1,0 +1,584 @@
+---
+title: "FReedOM simulation study"
+format:
+  html:
+    toc: true
+  pdf:
+    toc: true
+editor: visual
+bibliography: FReedOM_refs.bib
+---
+
+## Introduction
+
+This document contains reproducible code supporting the simulation-based sample size calculations for FReedOM, following methodological guidance for trials with a win ratio as the primary outcome [@Gregson2026]. Here, we will first describe the assumed underlying data generating process, illustrate the power of the trial at a range of effect sizes for the proposed sample size, and report the results of a sensitivity analysis.
+
+The underlying simulations are computationally intensive and are therefore not rerun when this document is rendered. Pre-generated simulation results are supplied alongside this document, allowing all reported analyses and figures to be reproduced directly. Code for regenerating the simulation results from first principles is included in unevaluated code blocks. Session information is included at the end of this document for full reproducibility.
+
+## The win ratio in FReedOM
+
+The proposed win ratio comprises a hierarchical ordering of three outcomes:
+
+- Time since randomisation until death;
+- Time since randomisation until progression;
+- Time since randomisation spent with grade 3 or 4 infection, up to 24 months post randomisation.
+
+The unmatched win ratio is calculated by comparing every possible pair of patients in the two randomised groups and, for each comparison, determining if the patient in the experimental arm "won" when compared to the patient in the control arm. To determine a win, we first look at the time until death. If one patient has an unambiguously better outcome, that patient will win the comparison and no further outcomes are considered. If it is not clear which patient had the better outcome (for example, due to censoring), then we consider this a "tie" and move on to consider time to progression in a similar fashion. Finally, if the patients are tied with respect to both time until death and time until progression, the patient who has the patient who has spent less time with a grade 3 or 4 infection (during their first 24 months of follow-up) will be the winner. If neither patient was infected during the trial, the final conclusion is a tie. 
+
+Having compared every pair of patients, the win ratio is simply the number of times the experimental arm patient won the comparison divided by the number of times the control arm patient won. Bootstrapping can then be used to estimate the standard error of the win ratio estimate, which allows the construction of a confidence interval as the basis of inference.
+
+## Data generating model
+
+We assume a continuous-time multi-state model (MSM), with constant hazards for all the transitions. The MSM has five states: healthy (H), infected (I), progressed (P), both infected and progressed (B), and dead (D). We allow for moving in and out of an infected state (from both healthy and progressed states), but think of progression as an irreversible event. This gives us the structure illustrated in @fig-msm.
+
+```{r, echo = FALSE}
+#| label: fig-msm
+#| fig-cap: "Multi-state model used to generate trial outcomes."
+
+library(ggdag)
+library(ggplot2)
+
+dag <- dagify(
+  D ~ H + P + I + B,
+  B ~ P,
+  B ~ I,
+  I ~ H,
+  P ~ H + B,
+  H ~ I,
+  exposure = "H",
+  outcome = "D",
+  coords = list(
+    x = c(H = 0, P = 1, I = 1, B = 1, D = 2),
+    y = c(H = 0, P = 1, I = -1, B = 0, D = 0)
+  )
+)
+ggplot(dag, aes(x=x, y=y, xend=xend, yend=yend)) + 
+  geom_dag_point(shape = 1) +
+  geom_dag_edges_arc(curvature = c(0,0,0.7,0,0,0,0,0)) +
+  geom_dag_text(colour = "black", label = c("B", "D", "H", "I", "P")) +
+  theme_void()
+```
+
+This MSM has 10 transition rates to be specified, which we simplify by assuming:
+
+-   the death rate is consistent across all four parent states;
+-   the progression rate is consistent across the H and I states;
+-   the recovery from infection rate is consistent across the I and B states.
+
+Given these assumptions, we can use the estimated hazard rates described in Section 1.2.9 of the application for transition rates in the control arm. Specifically, we take the combined hazard of progression and death to be $-\ln(0.807)/2 = $`{r} round( -log(0.807)/2, 3)`, and divide this such that 80% of the hazard relates to progression and the remaining 20% to death. For infections, we use the estimated infection incidence rate of 0.199 infections per patient per year. To model transitions out of an infected state, we use an assumed expected infection duration of 2 weeks. This gives us the following matrix of transition rates:
+
+```{r}
+# Overall rate for PFS
+PFS_rate <- -log(0.807)/2
+# Split this hazard into progression and death, where 1 indicates all progression
+PD_split <- 0.8
+# Control rate of infection
+inf_rate <- 0.19883279
+# Expected length of an infection (2 weeks)
+exp_inf <- 2/52
+
+HP <- PFS_rate*PD_split; HI <- inf_rate; HD <- PFS_rate*(1 - PD_split)
+# Assume transitions to T and D are the same after progression
+PB <- inf_rate; PD <- PFS_rate*(1 - PD_split)
+# Assume transitions to P and D are the same during infection
+IH <- 1/exp_inf ; IB <- PFS_rate*PD_split; ID <- PFS_rate*(1 - PD_split)
+BP <- 1/exp_inf ; BD <- PFS_rate*(1 - PD_split)
+
+qmat <- matrix(c(0 , HP, HI, 0 , HD,
+                 0 , 0 , 0 , PB, PD,
+                 IH, 0 , 0 , IB, ID,
+                 0 , BP, 0 , 0 , BD,
+                 0 , 0 , 0 , 0 , 0), ncol = 5, byrow = T)
+
+qmat
+```
+
+We will use this matrix `qmat` for the control group in all our simulations, and adjust it to form a transition matrix for the experimental group by applying effects. Specifically, we assume that treatment will have two effects. Firstly, it will affect all transition rates from uninfected into infected states; secondly, it will affect all transition rates into progressed and dead states. The following function accepts hazard ratios for these two effects (`I_eff` and `P_eff`, respectively) and applies them to the transition matrix for the control group:
+
+```{r}
+new_qmat <- function(I_eff, P_eff, qmat){
+  qmat_i <- qmat
+  qmat_i[1,2] <- P_eff*qmat_i[1,2] #H -> P
+  qmat_i[1,3] <- I_eff*qmat_i[1,3] #H -> I
+  qmat_i[1,5] <- P_eff*qmat_i[1,5] #H -> D
+  qmat_i[2,4] <- I_eff*qmat_i[2,4] #P -> B
+  qmat_i[2,5] <- P_eff*qmat_i[2,5] #P -> D
+  qmat_i[3,4] <- P_eff*qmat_i[3,4] #I -> B
+  qmat_i[3,5] <- P_eff*qmat_i[3,5] #I -> D
+  qmat_i[4,5] <- P_eff*qmat_i[4,5] #B -> D
+  
+  qmat_i
+}
+```
+
+Under the null hypothesis used to determine the NI margin, we assume no difference between arms in infection incidence (`I_eff = 1`), with the PFS effect set to the specified non-inferiority (NI) margin. For example, using a NI margin of 5% with respect to PFS, the transition matrix in the experimental arm will be
+
+```{r}
+I_eff <- 1
+P_eff <- (-log(0.757)/2)/(-log(0.807)/2) 
+
+qmat_0 <- new_qmat(I_eff, P_eff, qmat)
+```
+
+Under the point alternative hypothesis, we assume no deterioration in PFS (`P_eff = 1`) and a 50% reduction in infection incidence rate (`I_eff = 0.5`). This gives a transition matrix for the experimental arm of
+
+```{r}
+I_eff <- 0.5
+P_eff <- 1
+
+qmat_1 <- new_qmat(I_eff, P_eff, qmat)
+```
+
+With the MSM fully specified, we use the Gillespie algorithm [@Gillespie1976] for sampling a continuous-time markov process: at each step we first sample a time waiting in the current state before transitioning, and then sample the state the patient will transition into. Since we are working in R, it is much more efficient to do this in a vectorised way rather than patient by patient. This means we sample a vector of wait times (with one entry for each patient), and a vector of states to transition into, repeating this until all patients have either died or reached their maximum follow-up point. The latter reflects the gradual recruitment of patients over the two-year recruitment period.
+
+```{r}
+sim_patients <- function(fu_time, qmat, n){
+  # Simulate paths for n patients according to MSM qmat, recording their
+  # transition times and states. Return the summary information we
+  # need for analysis, i.e. progression and death event times (with
+  # censoring indicators) and total time spent in an infected state
+  
+  # States are ordered H, P, I, B, D
+  
+  # Initialise 
+  state <- rep(1, n)
+  time <- rep(0, n)
+  # Time-to-event times
+  TTD <- rep(0, n)
+  TTP <- rep(0, n)
+  # Time-to-event censoring indicators (1 = censored, 0 = observed)
+  TTD_cens <- rep(1, n)
+  TTP_cens <- rep(1, n)
+  # all_times is a matrix where the five columns record the time spent in the
+  # five corresponding states over the first 24 months post-randomisation
+  all_times <- matrix(rep(0, 5*n), ncol = 5)
+  
+  # Simulate maximum follow-up times to allow for gradual recruitment
+  # Note we have hard-coded 2 years of steady recruitment here
+  max_times <- runif(n, fu_time, fu_time + 2)
+  state_m <- NULL; time_m <- NULL
+  while(any(time < max_times) & !all(state == 5)){
+    # This loop will run while there is at least one patient who has not 
+    # died or reached the end of their maximum follow-up period
+    
+    # Get the rate parameter for staying in current state by summing 
+    # over the parameters in the relevant row of qmat
+    wait_rate <- rowSums(qmat[state,])
+    
+    # Simulate time in current state and update time
+    # Note we add a small component to the rate to avoid cases 
+    # with an infinite wait time when wait_rate = 0
+    wait <- rexp(n, wait_rate + 0.00001)
+    time <- time + wait
+    
+    # Add time in state for all other states, capping by their min follow-up
+    # time. Note  we subtract wait from time to take us back to the time
+    # before the current transition.
+    max_fu_time_left <- pmax(fu_time - (time-wait), 0)
+    all_times[cbind(1:n, state)] <- all_times[cbind(1:n, state)] + 
+      pmin(wait,  max_fu_time_left)
+    
+    # Simulate which state they move to next, using the relevant row of qmat
+    # when alive but fixing to ensure state D is absorbing
+    prev_state <- state
+    state <- sapply(state, function(z) sample(1:5, 1, 
+                                              prob = (z!=5)*qmat[z,] + 
+                                                (z==5)*c(0,0,0,0,1)))
+    
+    # Update the TTE times for all currently censored and alive patients
+    TTP_at_risk <- TTP_cens & (prev_state != 5)
+    TTP[TTP_at_risk] <- time[TTP_at_risk]
+    TTD[TTD_cens == 1] <- time[TTD_cens == 1]
+    
+    # Note if we have just observed a first progression or a death
+    TTP_cens <- TTP_cens*(state == 1 | state == 3 | state == 5)
+    TTD_cens <- TTD_cens*(state != 5)
+    
+    # Track times and states for debugging
+    state_m <- rbind(state_m, state)
+    time_m <- rbind(time_m, time)
+  }
+  
+  # Ensure all TTE times which happened after their patient's max follow-up 
+  # time are censored
+  TTD_cens <- TTD > max_times
+  TTP_cens <- TTP > max_times
+  # Cap all censored TTE times at the max follow=up times
+  TTD <- TTD_cens*pmin(TTD, max_times) + (1 - TTD_cens)*TTD
+  TTP <- TTP_cens*pmin(TTP, max_times) + (1 - TTP_cens)*TTP
+  
+  # Get the total time spent in infected states (I and B) in the first
+  # 24 months post-randomisation
+  inf_time <- all_times[,3] + all_times[,4]
+  
+  cbind(TTD, TTD_cens, TTP, TTP_cens, inf_time, all_times)
+}
+# For example, 
+sim_patients(fu_time = 2, qmat = qmat_0, n = 10)
+```
+
+## Analysis
+
+Given some simulated patient outcomes in both the experimental (`y_1`) and control arms (`y_0`), the following function takes a patient ID for the experimental arm (`p_id`), then computes all possible comparisons. It returns the number of times the experimental patient won, the number of times the control patient won, and the proportion of wins which were determined by each of the three components.
+
+```{r}
+count_wins <- function(p_id, y_0, y_1){
+  # For a given patient id in the y_1 data set, check against every member of
+  # the y_0 data set and record if the experimental patient wins (1), loses (0),
+  # or it's a draw (2)
+  
+  # Patient we are comparing
+  y <- y_1[p_id,]
+  
+  # Time until death
+  if(!y[2]){
+    # If we have an observed time for the exp patient death
+    w1 <- ifelse(!y_0[,2],
+                 # if the control patient time is also observed
+                 ifelse(y[1] > y_0[,1], 1, 0),
+                 # if the control patient time is censored
+                 ifelse(y[1] > y_0[,1], 2, 0))
+  } else {
+    # If we have a censored time for the exp patient death
+    w1 <- ifelse(!y_0[,2],
+                 # if the control patient time is observed
+                 ifelse(y[1] > y_0[,1], 1, 2),
+                 # if the control patient time is censored
+                 2)
+  }
+  
+  # Time until progression
+  if(!y[4]){
+    # If we have an observed time for the exp patient prog
+    w2 <- ifelse(!y_0[,4],
+                 # if the control patient time is also observed
+                 ifelse(y[3] > y_0[,3], 1, 0),
+                 # if the control patient time is censored
+                 ifelse(y[3] > y_0[,3], 2, 0))
+  } else {
+    # If we have a censored time for the exp patient death
+    w2 <- ifelse(!y_0[,4],
+                 # if the control patient time is observed
+                 ifelse(y[3] > y_0[,3], 1, 2),
+                 # if the control patient time is censored
+                 2)
+  }
+
+  # and finally time with infection
+  w3 <- ifelse(y[5] < y_0[,5], 1, 
+               ifelse(y[5] > y_0[,5], 0, 2))
+  
+  # Combine the wins hierarchically
+  w <- w1 
+  # If w1 is a draw, look at w2
+  w[w1 == 2] <- w2[w1 == 2]
+  # If w1 and w2 are draws, look at w3
+  w[w1 == 2 & w2 == 2] <- w3[w1 == 2 & w2 == 2]
+  
+  # record which outcome was the deciding factor in each comparison
+  wins <- rep(1, nrow(y_0))
+  wins[w1 == 2] <- 2
+  wins[w1 == 2 & w2 == 2] <- 3
+  
+  # Return the two components of the win ratio, and where the wins happened
+  # on average
+  c(sum(w == 1), sum(w == 0), 
+    mean(wins == 1), mean(wins == 2), mean(wins == 3))
+}
+```
+
+Finally, the following function simulates a full trial with `n` patients in each arm and transition matrices `ctr_qmat` and `int_qmat` in the control and experimental arms, respectively.
+
+```{r}
+sim_trial <- function(ctr_qmat,  exp_qmat, n){
+
+  # Simulate patient data
+  y_0 <- sim_patients(2, ctr_qmat, n)
+  y_1 <- sim_patients(2, exp_qmat, n)
+  
+  # Calculate the win ratio
+  r <- t(sapply(1:nrow(y_1), function(x) count_wins(x, y_0, y_1)))
+  wr <- sum(r[,1])/sum(r[,2])
+  
+  wr
+}
+```
+
+## WR non-inferiority margin
+
+We start by mapping our non-inferiority hypotheses to the win ratio scale. The WR is a consistent estimator, but biased in small samples. We therefore simulate a large ($N = 10\^4$) number of trials, each with a large per-arm sample size ($n = 10\^3$). The mean of the estimated win ratios then provides an accurate estimate of the true win ratio under our non-inferiority hypotheses. Note that this code is not run when rendering the document.
+
+```{r, eval = FALSE}
+set.seed(872356)
+
+I_eff <- 1
+P_eff <- (-log(0.707)/2)/(-log(0.807)/2) # 10% NI margin
+
+qmat_0 <- new_qmat(I_eff, P_eff, qmat)
+
+ptm <- proc.time()
+sim_r_null_10 <- t(replicate(10^4, sim_trial(ctr_qmat = qmat, exp_qmat = qmat_0, n = 10^3)))
+proc.time() - ptm
+
+# Estimate the NI margin on the WR scale
+mean(sim_r_null_10)
+# 0.7299856
+
+P_eff <- (-log(0.757)/2)/(-log(0.807)/2) # 5% NI margin
+
+qmat_0 <- new_qmat(I_eff, P_eff, qmat)
+
+sim_r_null_5 <- t(replicate(10^4, sim_trial(ctr_qmat = qmat, exp_qmat = qmat_0, n = 10^3)))
+
+# Estimate the NI margin on the WR scale
+mean(sim_r_null_5)
+# 0.8521567
+```
+
+```{r}
+ni_marg_10 <- 0.7299856
+ni_marg_5 <- 0.8521567
+```
+
+## WR power
+
+With the NI margins established, we can now estimate power at any point in the effect space through simulation. Here we assume an analysis which will estimate the WR, construct a confidence interval, and report a statistically significant result if the lower bound of that interval excludes the NI margin. We assume the bootstrap will be used to construct the confidence intervals via a log transform. We use this transformation on the grounds that the transformed values will closely follow a normal distribution, which we can check empirically using our simulation:
+
+```{r}
+#| label: fig-qq
+#| fig-cap: "QQ plot assessing normality of the log win ratio."
+
+set.seed(9325134)
+sim_r_null_10 <- t(replicate(10^3, sim_trial(ctr_qmat = qmat, exp_qmat = qmat_0, n = 214)))
+df_log <- data.frame(log_wr = as.vector(log(sim_r_null_10)))
+ggplot(df_log, aes(sample = log_wr)) + stat_qq() + stat_qq_line() +
+  xlab("Theoretical quantiles") + ylab("Sample quantiles") +
+  theme_minimal()
+```
+
+The QQ plot of @fig-qq indicates that the normal approximation for the log win ratio is reasonable. We therefore estimate the standard deviation of the transformed estimates and use that to construct a 95% confidence interval, then transform back the lower limit of the interval and compare against our non-inferiority margins:
+
+```{r, eval = FALSE}
+wr_sig <- function(effects, n, qmat, ni_marg_10, ni_marg_5){
+  I_eff <- effects[1]; P_eff <- effects[2]
+ 
+  ctr_qmat <- qmat
+  int_qmat <- new_qmat(I_eff, P_eff, qmat)
+  
+  y_0 <- sim_patients(2, ctr_qmat, n)
+  y_1 <- sim_patients(2, int_qmat, n)
+  
+  r <- t(sapply(1:n, function(x) count_wins(x, y_0, y_1)))
+  wr <- sum(r[,1])/sum(r[,2])
+  
+  # Bootstrap the sample
+  wrs <- NULL
+  for(i in 1:100){
+    y_0_boot <- y_0[sample(1:n, replace = TRUE),]
+    y_1_boot <- y_1[sample(1:n, replace = TRUE),]
+    r <- t(sapply(1:n, function(x) count_wins(x, y_0_boot, y_1_boot)))
+    wr_boot <- sum(r[,1])/sum(r[,2])
+    wrs <- c(wrs, wr_boot)
+  }
+  # Find the lower 95% confidence interval bound
+  lo_ci <- exp(log(wr) - qnorm(0.975)*sd(log(wrs)))  
+  
+  # Compare the bound against the NI margin on the win ratio scale
+  return(c(lo_ci > ni_marg_10, lo_ci > ni_marg_5))
+}
+
+ptm <- proc.time()
+rowMeans(replicate(100, wr_sig(c(0.5, 1), 214, qmat, ni_marg_10, ni_marg_5)))
+proc.time() - ptm
+```
+
+The nested sampling of this approach is quite computationally demanding - to simulate the 100 trials above took 6.5 minutes. Since we want to have more simulated trials, and want to repeat our analysis at a range of effect sizes, for computational efficiency, the standard error of the log win ratio was estimated directly from its Monte Carlo sampling distribution across independently simulated trials, rather than by performing an internal bootstrap within every simulated trial. This relies on the usual bootstrap argument that the resampling distribution approximates the estimator’s sampling distribution.
+
+```{r, eval = FALSE}
+wr_power <- function(effects, n, qmat, N){
+  I_eff <- effects[1]; P_eff <- effects[2]
+  int_qmat <- new_qmat(I_eff, P_eff, qmat)
+  
+  ests <- replicate(N, sim_trial(ctr_qmat = qmat, int_qmat, n))
+  
+  log_ests <- log(ests)
+  log_lo_cis <- log_ests - qnorm(0.975)*sd(log_ests) 
+  lo_cis <- exp(log_lo_cis)
+  
+  # Return the sampled lower 95% CI bounds
+  return(lo_cis)
+}
+
+# Construct a grid of effects
+effects <- expand.grid(I_effs = seq(0.5, 1, length.out=20),
+                       P_effs = seq(1, 1.625, length.out=20))
+
+# Note, 20 x 20 points with N = 10^3 at each takes ~ 8 hours
+
+#set.seed(8763285)
+#df <- cbind(effects, t(apply(effects, 1, wr_power,
+#                             n = 225, qmat=qmat, N = 10^1)))
+#saveRDS(df, "raw_sims_225.rds")
+
+set.seed(3240387)
+df <- cbind(effects, t(apply(effects, 1, wr_power,
+                             n = 214, qmat=qmat, N = 10^3)))
+#saveRDS(df, "raw_sims_214.rds")
+```
+
+Having saved the results of the above simulations, we can now estimate power as a function over the effect space. Note that we fit a GAM to smooth and interpolate the individual raw power estimates. The resulting contours of predicted power are illustrated in @fig-pow5 and @fig-pow10.
+
+```{r}
+df <- readRDS("raw_sims_214.rds")
+
+# Power under the 10% NI margin
+df$pow10 <- apply(df[,3:ncol(df)], 1, function(x) mean(x > ni_marg_10))
+# Power under the 5% NI margin
+df$pow5 <- apply(df[,3:ncol(df)], 1, function(x) mean(x > ni_marg_5))
+
+library(mgcv)
+library(ggplot2)
+
+# Fit GAMs to the estimated powers
+fit5 <- gam(pow5 ~ te(I_effs, P_effs), data = df)
+fit10 <- gam(pow10 ~ te(I_effs, P_effs), data = df)
+
+df$pred_pow5 <- predict(fit5)
+df$pred_pow10 <- predict(fit10)
+```
+
+```{r}
+#| label: fig-pow5
+#| fig-cap: "Power contours of a trial with n = 214 participants per arm, when testing a 5% NI margin. The red contour represents a power of 0.025, while the green represents a power of 0.8."
+#| 
+ggplot(df, aes(I_effs, P_effs)) +
+  metR::geom_contour2(aes(z = pred_pow5, 
+                          label = stat(level))) +
+  geom_contour(aes(z = pred_pow5), colour = "red", breaks=0.025, linewidth=1) +
+  geom_contour(aes(z = pred_pow5), colour = "green", breaks=0.8, linewidth=1) + 
+  theme_minimal() +
+  xlab("Infection effect") + ylab("PFS effect") 
+
+ggsave("WR_pow_5.png", width = 5, height = 4)
+```
+
+```{r}
+#| label: fig-pow10
+#| fig-cap: "Power contours of a trial with n = 214 participants per arm, when testing a 10% NI margin. The red contour represents a power of 0.025, while the green represents a power of 0.8."
+#| 
+ggplot(df, aes(I_effs, P_effs)) +
+  metR::geom_contour2(aes(z = pred_pow10, 
+                          label = stat(level))) +
+  geom_contour(aes(z = pred_pow10), colour = "red", breaks=0.025, linewidth=1) +
+  geom_contour(aes(z = pred_pow10), colour = "green", breaks=0.8, linewidth=1) + 
+  theme_minimal() +
+  xlab("Infection effect") + ylab("PFS effect") 
+
+ggsave("WR_pow_10.png", width = 5, height = 4)
+
+# Print the maximum power attained over the full effect space
+max(df$pred_pow5)
+max(df$pred_pow10)
+```
+
+We can also look at specific estimates of power at points in the effect space, alongside their estimated standard errors and (Wald) confidence intervals.
+
+```{r}
+# For PFS effects, look at 0, 2.5, 5, 7.5 and 10% deterioration
+df_preds <- expand.grid(I_effs = seq(0.5, 1, 0.1),
+                        P_effs = (-log(seq(0.707, 0.807, 0.025)) / 24) / (-log(0.807) / 24))
+
+df_preds <- cbind(df_preds, predict(fit5, newdata = df_preds, se.fit = TRUE))
+df_preds <- cbind(df_preds, df_preds[,3] - qnorm(0.975)*df_preds[,4], 
+                  df_preds[,3] + qnorm(0.975)*df_preds[,4])
+
+df_preds <- cbind(df_preds, predict(fit10, newdata = df_preds[,1:2], se.fit = TRUE))
+df_preds <- cbind(df_preds, df_preds[,7] - qnorm(0.975)*df_preds[,8], 
+                  df_preds[,7] + qnorm(0.975)*df_preds[,8])
+
+names(df_preds)[3:10] <- c("pred_pow5", "se5", "lo_ci5", "hi_ci5", "pred_pow10", "se10", "lo_ci10", "hi_ci10")
+
+round(df_preds, 3)
+```
+
+## Sensitivity analysis
+
+Finally, we can examine sensitivity to our assumed nuisance parameter values. We will do this probabilistically. In each iteration we sample a vector of multiplicative adjustments from a log-normal distribution, where each element $\delta$ is i.i.d.
+
+$$
+\log{\delta} \sim N(0, 0.1^2),
+$$
+
+giving a density for the adjustments illustrated in @fig-sens-adj.
+
+```{r}
+#| label: fig-sens-adj
+#| fig-cap: "Density function for the multiplcative adjustements applied to elements of the transition matrix in the sensitivity anaysis."
+#| 
+x <- seq(0.6, 1.5, 0.01)
+y <- dlnorm(x, meanlog = 0, sdlog = 0.1)
+df_LN <- data.frame(x=x, y=y)
+
+ggplot(df_LN, aes(x, y)) + geom_line() +
+  xlab(expression(delta)) +
+  ylab("Density") +
+  theme_minimal()
+```
+
+We then apply these random adjustments to the elements of the transition matrix in the control arm, before applying the effect under the point alternative hypothesis (i.e. no difference in PFS, and a 50% improvement in infection incidence) and estimating power in the same way as above. 
+
+```{r, eval = FALSE}
+set.seed(2853052)
+
+df_sens <- NULL
+ptm <- proc.time()
+# Note - 100 runs with N = 10^3 will take around two hours
+for(i in 1:100){
+  sens_qmat <- qmat * matrix(exp(rnorm(5*5, sd = 0.1)), ncol = 5)
+  lo_cis <- wr_power(c(0.5, 1), n = 214, qmat = sens_qmat, N = 10^3)
+  pow5 <- mean(lo_cis > ni_marg_5)
+  pow10 <- mean(lo_cis > ni_marg_10)
+  x <- as.vector(sens_qmat)
+  x <-  x[x != 0]
+  df_sens <- rbind(df_sens, c(pow5, pow10, x))
+}
+proc.time() - ptm
+
+#saveRDS(df_sens, "raw_sims_sens.rds")
+```
+
+We then plot the resulting histograms of power at the point alternative under both the 5 and 10% non-inferiority margins, as shown in @fig-sens5 and @fig-sens10.
+
+```{r}
+#| label: fig-sens5
+#| fig-cap: "Histrogram of 100 estimated powers in the sensitivity analysis, when using an NI margin of 5%."
+df_sens <- as.data.frame(readRDS("raw_sims_sens.rds"))
+names(df_sens)[1:2] <- c("sens_pow5", "sens_pow10")
+
+ggplot(df_sens, aes(sens_pow5)) + 
+  geom_histogram(bins = 6, fill = "grey70", colour = "black") +
+  xlab("Power (5% NI margin)") +
+  theme_minimal()
+```
+
+```{r}
+#| label: fig-sens10
+#| fig-cap: "Histrogram of 100 estimated powers in the sensitivity analysis, when using an NI margin of 10%."
+ggplot(df_sens, aes(sens_pow10)) + 
+  geom_histogram(bins = 6, fill = "grey70", colour = "black") +
+  xlab("Power (10% NI margin)") +
+  theme_minimal()
+```
+For the 5% NI margin, 95% of the estimated powers lie within the interval (`{r} round(as.vector(quantile(df_sens$sens_pow5, c(0.025, 0.975))), 2)`). For the 10% margin, the corresponding interval is (`{r} round(as.vector(quantile(df_sens$sens_pow10, c(0.025, 0.975))), 2)`). For context, the 95% interval for the multiplicative adjustments is (`{r}  round(qlnorm(c(0.025, 0.975), meanlog = 0, sdlog = 0.1), 2)`).
+
+## References
+
+::: {#refs}
+:::
+
+## Session information
+
+```{r}
+sessioninfo::session_info()
+```
+
